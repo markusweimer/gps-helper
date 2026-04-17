@@ -14,6 +14,19 @@ from .model import TracePoint
 from .simplify import simplify as simplify_points
 
 
+def _progress(done: int, total: int, chunk: int, total_chunks: int) -> None:
+    pct = done * 100 // total if total else 100
+    print(
+        f"\r  Aligning: chunk {chunk}/{total_chunks} "
+        f"({pct}% of points)",
+        end="", flush=True, file=sys.stderr,
+    )
+
+
+def _finish_progress() -> None:
+    print(file=sys.stderr)  # newline after \r progress
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gps-helper",
@@ -81,10 +94,13 @@ def _make_backend(args) -> tuple:
 def _do_align(points: Sequence[TracePoint], args) -> List[TracePoint]:
     backend, http = _make_backend(args)
     try:
-        return align_points(
+        result = align_points(
             points, backend,
             chunk_size=args.chunk_size, overlap=args.overlap,
+            on_progress=_progress,
         )
+        _finish_progress()
+        return result
     finally:
         http.close()
 
@@ -93,15 +109,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _build_parser().parse_args(argv)
 
     if args.command == "align":
+        print(f"Loading {args.input} ...", file=sys.stderr)
         points = load_points(args.input)
+        print(f"  {len(points)} points loaded.", file=sys.stderr)
         aligned = _do_align(points, args)
+        print(f"Writing {args.output} ...", file=sys.stderr)
         write_points(aligned, args.output)
-        print(f"Aligned {len(points)} -> {len(aligned)} points "
-              f"(wrote {args.output}).", file=sys.stderr)
+        print(f"Done: {len(points)} -> {len(aligned)} points.", file=sys.stderr)
         return 0
 
     if args.command == "simplify":
+        print(f"Loading {args.input} ...", file=sys.stderr)
         points = load_points(args.input)
+        print(f"  {len(points)} points loaded.", file=sys.stderr)
         if not has_any_way_id(points):
             print(
                 "error: input has no <gh:way_id> extensions; run "
@@ -110,19 +130,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             return 2
         result = simplify_points(points, context=args.context)
+        print(f"Writing {args.output} ...", file=sys.stderr)
         write_points(result, args.output)
-        print(f"Simplified {len(points)} -> {len(result)} points "
-              f"(wrote {args.output}).", file=sys.stderr)
+        print(f"Done: {len(points)} -> {len(result)} points "
+              f"({len(points) - len(result)} removed).", file=sys.stderr)
         return 0
 
     if args.command == "process":
+        print(f"Loading {args.input} ...", file=sys.stderr)
         points = load_points(args.input)
+        print(f"  {len(points)} points loaded.", file=sys.stderr)
         aligned = _do_align(points, args)
+        print("Simplifying ...", file=sys.stderr)
         result = simplify_points(aligned, context=args.context)
+        print(f"Writing {args.output} ...", file=sys.stderr)
         write_points(result, args.output)
         print(
-            f"Processed {len(points)} -> aligned {len(aligned)} -> "
-            f"simplified {len(result)} points (wrote {args.output}).",
+            f"Done: {len(points)} -> aligned {len(aligned)} -> "
+            f"simplified {len(result)} points "
+            f"({len(points) - len(result)} removed).",
             file=sys.stderr,
         )
         return 0
