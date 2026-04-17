@@ -1,0 +1,14 @@
+{
+  "edges": [
+    {"way_id": 1001, "names": ["Main Street"]},
+    {"way_id": 1002, "names": ["Oak Avenue"]},
+    {"way_id": 1003, "names": ["Oak Avenue"]}
+  ],
+  "matched_points": [
+    {"lat": 40.0, "lon": -105.0, "type": "matched", "edge_index": 0},
+    {"lat": 40.001, "lon": -105.001, "type": "matched", "edge_index": 0},
+    {"lat": 40.002, "lon": -105.002, "type": "matched", "edge_index": 1},
+    {"lat": 40.003, "lon": -105.003, "type": "unmatched"},
+    {"lat": 40.004, "lon": -105.004, "type": "matched", "edge_index": 2}
+  ]
+}
