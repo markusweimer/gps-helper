@@ -55,6 +55,7 @@ def parse_trace_attributes(
         lat = src.lat
         lon = src.lon
         way_id = None
+        road_name = None
         if m:
             lat = m.get("lat", lat)
             lon = m.get("lon", lon)
@@ -64,11 +65,14 @@ def parse_trace_attributes(
                 ei = m.get("edge_index")
                 if ei is not None and 0 <= ei < len(edges):
                     way_id = edges[ei].get("way_id")
+                    names = edges[ei].get("names") or []
+                    if names:
+                        road_name = names[0]
         out.append(
             TracePoint(
                 lat=lat, lon=lon,
                 elevation=src.elevation, time=src.time,
-                way_id=way_id, source=src.source,
+                way_id=way_id, road_name=road_name, source=src.source,
             )
         )
     return out
