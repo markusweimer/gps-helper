@@ -17,6 +17,7 @@ class TracePoint:
     # Opaque per-point metadata preserved across align/simplify
     # (e.g. way_id once matched).
     way_id: Optional[int] = None
+    road_name: Optional[str] = None
     # Original gpxpy trackpoint reference, kept so we can re-emit the point
     # with its original extensions/extras untouched.
     source: object = field(default=None, repr=False, compare=False)

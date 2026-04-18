@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import List, Optional, Sequence
 
 from . import __version__
 from . import backends as backends_mod
 from .align import align as align_points
-from .gpx_io import has_any_way_id, load_points, write_points
+from .gpx_io import has_any_way_id, load_points, write_points, write_route
 from .http import HttpClient
 from .model import TracePoint
 from .simplify import simplify as simplify_points
+from .simplify import simplify_to_route
 
 
 def _progress(done: int, total: int, chunk: int, total_chunks: int) -> None:
@@ -25,6 +27,12 @@ def _progress(done: int, total: int, chunk: int, total_chunks: int) -> None:
 
 def _finish_progress() -> None:
     print(file=sys.stderr)  # newline after \r progress
+
+
+def _suffixed_path(base: str, suffix: str) -> str:
+    """Derive a suffixed output path: 'ride.gpx' + 'aligned' -> 'ride.aligned.gpx'."""
+    root, ext = os.path.splitext(base)
+    return f"{root}.{suffix}{ext}"
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -72,11 +80,19 @@ def _build_parser() -> argparse.ArgumentParser:
     sp_simp.add_argument("--context", type=int, default=2,
                          help="Points to keep before & after each road change "
                               "(default: 2).")
+    sp_simp.add_argument("--format", "-f", choices=["track", "route"],
+                         default="track",
+                         help="Output format: track (<trk>) or route (<rte>). "
+                              "Default: track.")
 
     sp_proc = sub.add_parser(
         "process", help="Align then simplify in a single run.",
     )
-    add_io_flags(sp_proc)
+    sp_proc.add_argument("input", help="Input GPX file.")
+    sp_proc.add_argument("-o", "--output", default=None,
+                         help="Base name for outputs. Defaults to input name. "
+                              "Produces <base>.aligned.gpx, <base>.simplified.gpx, "
+                              "<base>.route.gpx.")
     add_backend_flags(sp_proc)
     sp_proc.add_argument("--context", type=int, default=2,
                          help="Points to keep before & after each road change "
@@ -129,28 +145,51 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 file=sys.stderr,
             )
             return 2
-        result = simplify_points(points, context=args.context)
-        print(f"Writing {args.output} ...", file=sys.stderr)
-        write_points(result, args.output)
+        if args.format == "route":
+            result = simplify_to_route(points)
+            print(f"Writing route {args.output} ...", file=sys.stderr)
+            write_route(result, args.output)
+        else:
+            result = simplify_points(points, context=args.context)
+            print(f"Writing {args.output} ...", file=sys.stderr)
+            write_points(result, args.output)
         print(f"Done: {len(points)} -> {len(result)} points "
               f"({len(points) - len(result)} removed).", file=sys.stderr)
         return 0
 
     if args.command == "process":
+        base = args.output or args.input
+        path_aligned = _suffixed_path(base, "aligned")
+        path_simplified = _suffixed_path(base, "simplified")
+        path_route = _suffixed_path(base, "route")
+
         print(f"Loading {args.input} ...", file=sys.stderr)
         points = load_points(args.input)
         print(f"  {len(points)} points loaded.", file=sys.stderr)
         aligned = _do_align(points, args)
+
+        print(f"Writing {path_aligned} ...", file=sys.stderr)
+        write_points(aligned, path_aligned)
+
         print("Simplifying ...", file=sys.stderr)
-        result = simplify_points(aligned, context=args.context)
-        print(f"Writing {args.output} ...", file=sys.stderr)
-        write_points(result, args.output)
+        simplified = simplify_points(aligned, context=args.context)
+        print(f"Writing {path_simplified} ...", file=sys.stderr)
+        write_points(simplified, path_simplified)
+
+        route_pts = simplify_to_route(aligned)
+        print(f"Writing {path_route} ...", file=sys.stderr)
+        write_route(route_pts, path_route)
+
         print(
-            f"Done: {len(points)} -> aligned {len(aligned)} -> "
-            f"simplified {len(result)} points "
-            f"({len(points) - len(result)} removed).",
+            f"Done: {len(points)} points -> "
+            f"{len(aligned)} aligned, "
+            f"{len(simplified)} simplified, "
+            f"{len(route_pts)} route points.",
             file=sys.stderr,
         )
+        print(f"  {path_aligned}", file=sys.stderr)
+        print(f"  {path_simplified}", file=sys.stderr)
+        print(f"  {path_route}", file=sys.stderr)
         return 0
 
     return 1  # pragma: no cover

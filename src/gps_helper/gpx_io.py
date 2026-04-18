@@ -103,5 +103,29 @@ def write_points(points: Sequence[TracePoint], path: str) -> None:
         f.write(gpx.to_xml())
 
 
+def write_route(points: Sequence[TracePoint], path: str) -> None:
+    """Write points as a GPX route (<rte>/<rtept>).
+
+    Each routepoint gets a <name> from road_name or way_id for readability
+    in GPS apps.
+    """
+    gpx = gpxpy.gpx.GPX()
+    route = gpxpy.gpx.GPXRoute()
+    gpx.routes.append(route)
+
+    for tp in points:
+        name = tp.road_name or (f"way {tp.way_id}" if tp.way_id else None)
+        rpt = gpxpy.gpx.GPXRoutePoint(
+            latitude=tp.lat,
+            longitude=tp.lon,
+            elevation=tp.elevation,
+            name=name,
+        )
+        route.points.append(rpt)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(gpx.to_xml())
+
+
 def has_any_way_id(points: Iterable[TracePoint]) -> bool:
     return any(p.way_id is not None for p in points)

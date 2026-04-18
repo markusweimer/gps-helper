@@ -12,6 +12,9 @@ def test_parse_trace_attributes():
     pts = [TracePoint(lat=0.0, lon=0.0) for _ in range(5)]
     out = parse_trace_attributes(data, pts)
     assert [p.way_id for p in out] == [1001, 1001, 1002, None, 1003]
+    assert [p.road_name for p in out] == [
+        "Main Street", "Main Street", "Oak Avenue", None, "Oak Avenue",
+    ]
     # Coordinates replaced with matched coordinates
     assert abs(out[0].lat - 40.0) < 1e-9
     assert abs(out[4].lon - -105.004) < 1e-9
