@@ -48,6 +48,24 @@ gps-helper simplify aligned.gpx -o simplified.gpx
 gps-helper simplify aligned.gpx -o route.gpx --format route
 ```
 
+### Converting routes to tracks
+
+Route files exported from a Garmin device or BaseCamp carry the calculated road
+geometry as `gpxx:rpt` shape points. To turn each route into a track that
+follows those roads:
+
+```bash
+gps-helper route-to-track trip.gpx
+# -> trip.track.gpx
+
+gps-helper route-to-track trip.gpx -o out.gpx
+```
+
+Each route becomes one track with the same name, and waypoints are kept. Only
+coordinates carry over to track points. A route without shape points becomes
+straight lines between its via-points, which shows in the summary as the same
+number of route points and track points.
+
 ### Common options
 
 | Flag | Default | Notes |

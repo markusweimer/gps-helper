@@ -305,3 +305,69 @@ fn version_flag_prints_the_version() {
         concat!("gps-helper ", env!("CARGO_PKG_VERSION"))
     );
 }
+
+const ROUTE_INPUT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="test" xmlns="http://www.topografix.com/GPX/1/1"
+     xmlns:gpxx="http://www.garmin.com/xmlschemas/GpxExtensions/v3">
+  <wpt lat="1.5" lon="2.5"><name>Stop</name></wpt>
+  <rte>
+    <name>Morning</name>
+    <rtept lat="10" lon="20">
+      <extensions><gpxx:RoutePointExtension>
+        <gpxx:rpt lat="10" lon="20"/>
+        <gpxx:rpt lat="10.5" lon="20.5"/>
+      </gpxx:RoutePointExtension></extensions>
+    </rtept>
+    <rtept lat="11" lon="21"/>
+  </rte>
+  <rte><rtept lat="30" lon="40"/></rte>
+</gpx>
+"#;
+
+#[test]
+fn route_to_track_writes_next_to_the_input_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("trip.gpx");
+    fs::write(&input, ROUTE_INPUT).unwrap();
+
+    let output = gps_helper(&["route-to-track", path_str(&input)]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stderr(&output).contains("Morning: 2 route points -> 3 track points."));
+    assert!(stderr(&output).contains("(unnamed): 1 route points -> 1 track points."));
+
+    let xml = fs::read_to_string(dir.path().join("trip.track.gpx")).unwrap();
+    assert_eq!(count(&xml, "<trk>"), 2);
+    assert_eq!(count(&xml, "<trkpt"), 4);
+    assert_eq!(count(&xml, "<wpt"), 1);
+    assert_eq!(count(&xml, "<rte"), 0);
+}
+
+#[test]
+fn route_to_track_honors_output_and_feeds_the_other_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("trip.gpx");
+    let track = dir.path().join("chosen.gpx");
+    fs::write(&input, ROUTE_INPUT).unwrap();
+
+    let output = gps_helper(&["route-to-track", path_str(&input), "-o", path_str(&track)]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(track.exists());
+    assert!(!dir.path().join("trip.track.gpx").exists());
+
+    // The result is an ordinary track file, so the pipeline can read it.
+    let simplified = dir.path().join("simplified.gpx");
+    let simplify = gps_helper(&["simplify", path_str(&track), "-o", path_str(&simplified)]);
+    assert_eq!(simplify.status.code(), Some(2), "{}", stderr(&simplify));
+    assert!(stderr(&simplify).contains("no <gh:way_id>"));
+}
+
+#[test]
+fn route_to_track_refuses_files_without_routes_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = write_input(dir.path());
+
+    let output = gps_helper(&["route-to-track", &input]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("no <rte> routes"));
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}

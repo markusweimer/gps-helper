@@ -50,6 +50,14 @@ enum Command {
         #[command(flatten)]
         context: ContextArg,
     },
+    /// Convert GPX routes to tracks, following any Garmin road geometry.
+    RouteToTrack {
+        /// Input GPX file.
+        input: PathBuf,
+        /// Output GPX file. Defaults to <input>.track.gpx next to the input.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[derive(Args)]
@@ -209,6 +217,24 @@ fn run(cli: Cli) -> Result<(), Failure> {
             eprintln!("  {}", path_aligned.display());
             eprintln!("  {}", path_simplified.display());
             eprintln!("  {}", path_route.display());
+        }
+        Command::RouteToTrack { input, output } => {
+            let output = output.unwrap_or_else(|| suffixed_path(&input, "track"));
+            eprintln!("Loading {} ...", input.display());
+            let file = gpx::load_routes(&input)?;
+            if file.routes.is_empty() {
+                return Err(Failure::Usage("input has no <rte> routes.".to_owned()));
+            }
+            eprintln!("Writing {} ...", output.display());
+            gpx::save_routes_as_tracks(&output, &file)?;
+            for route in &file.routes {
+                eprintln!(
+                    "{}: {} route points -> {} track points.",
+                    route.name.as_deref().unwrap_or("(unnamed)"),
+                    route.via_point_count,
+                    route.points.len()
+                );
+            }
         }
     }
     Ok(())

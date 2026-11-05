@@ -2,8 +2,12 @@
 //!
 //! This is built directly on an XML parser because points must round-trip
 //! with their `<extensions>` intact, including ones this crate knows nothing
-//! about. Output is always GPX 1.1, and is one track with one segment or one
-//! route. Only trackpoints are read; waypoints, routes and metadata are ignored.
+//! about. Output is always GPX 1.1.
+//!
+//! [`read_points`] reads trackpoints, and writes them back as one track with one
+//! segment or one route. [`read_routes`] reads routes and waypoints instead, for
+//! [`write_routes_as_tracks`] to turn into one track per route. Metadata is
+//! always ignored.
 
 use std::fmt::Write as _;
 use std::fs::{self, File};
@@ -24,6 +28,7 @@ pub const WAY_ID_NAMESPACE: &str = "https://github.com/gps-helper/gps-helper";
 
 const WAY_ID_PREFIX: &str = "gh";
 const WAY_ID_LOCAL_NAME: &str = "way_id";
+const GARMIN_NAMESPACE: &str = "http://www.garmin.com/xmlschemas/GpxExtensions/v3";
 const GPX_NAMESPACE: &str = "http://www.topografix.com/GPX/1/1";
 const XSI_NAMESPACE: &str = "http://www.w3.org/2001/XMLSchema-instance";
 const SCHEMA_LOCATION: &str =
@@ -39,13 +44,44 @@ pub fn has_any_way_id(points: &[TracePoint]) -> bool {
     points.iter().any(|p| p.way_id.is_some())
 }
 
+/// The routes and waypoints of a GPX file.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct RouteFile {
+    /// The file's waypoints.
+    pub waypoints: Vec<TracePoint>,
+    /// The file's routes.
+    pub routes: Vec<Route>,
+}
+
+/// A route, flattened into the path it follows.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct Route {
+    /// The route's name, if it has one.
+    pub name: Option<String>,
+    /// How many `<rtept>` via-points the route has.
+    pub via_point_count: usize,
+    /// The via-points and Garmin shape points in order, with only coordinates
+    /// set. Consecutive points at the same position are merged.
+    pub points: Vec<TracePoint>,
+}
+
 // --- Reading -----------------------------------------------------------------
 
 /// Reads all trackpoints in a GPX file, across all tracks and segments.
 pub fn load_points(path: impl AsRef<Path>) -> Result<Vec<TracePoint>> {
-    let path = path.as_ref();
+    load_with(path.as_ref(), read_points)
+}
+
+/// Reads all routes and waypoints in a GPX file.
+pub fn load_routes(path: impl AsRef<Path>) -> Result<RouteFile> {
+    load_with(path.as_ref(), read_routes)
+}
+
+fn load_with<T>(path: &Path, read: impl FnOnce(BufReader<File>) -> Result<T>) -> Result<T> {
     let file = File::open(path).map_err(|source| io_error(path, source))?;
-    read_points(BufReader::new(file)).map_err(|error| match error {
+    read(BufReader::new(file)).map_err(|error| match error {
         Error::Io { source, .. } => io_error(path, source),
         other => other,
     })
@@ -58,7 +94,17 @@ pub fn load_points(path: impl AsRef<Path>) -> Result<Vec<TracePoint>> {
 /// (an unreadable one means the point is not aligned). Times with no UTC offset
 /// are taken as UTC, as the GPX specification requires.
 pub fn read_points(reader: impl BufRead) -> Result<Vec<TracePoint>> {
-    Parser::new(reader).document()
+    Parser::new(reader).document(Parser::root_children)
+}
+
+/// Reads all routes and waypoints from a GPX document.
+///
+/// Devices that calculate a route store the road geometry between via-points as
+/// Garmin `<gpxx:rpt>` shape points, which become part of [`Route::points`]. A
+/// route without them has only its via-points, so the path it describes is
+/// straight lines between those.
+pub fn read_routes(reader: impl BufRead) -> Result<RouteFile> {
+    Parser::new(reader).document(Parser::route_root_children)
 }
 
 struct Parser<R> {
@@ -107,8 +153,11 @@ impl<R: BufRead> Parser<R> {
         }
     }
 
-    fn document(&mut self) -> Result<Vec<TracePoint>> {
-        let mut points = Vec::new();
+    fn document<T: Default>(
+        &mut self,
+        mut root_children: impl FnMut(&mut Self, &mut T) -> Result<()>,
+    ) -> Result<T> {
+        let mut content = T::default();
         let mut found_root = false;
         loop {
             match self.next_event()? {
@@ -117,10 +166,10 @@ impl<R: BufRead> Parser<R> {
                 }
                 Event::Start(_) => {
                     found_root = true;
-                    self.root_children(&mut points)?;
+                    root_children(self, &mut content)?;
                 }
                 Event::Empty(_) => found_root = true,
-                Event::Eof if found_root => return Ok(points),
+                Event::Eof if found_root => return Ok(content),
                 Event::Eof => return Err(Error::InvalidGpx("no root element".into())),
                 _ => {}
             }
@@ -193,6 +242,82 @@ impl<R: BufRead> Parser<R> {
                 "extensions" => self.extensions(point)?,
                 _ => self.skip_element(start.name())?,
             }
+        }
+    }
+
+    fn route_root_children(&mut self, file: &mut RouteFile) -> Result<()> {
+        loop {
+            match self.next_event()? {
+                Event::Start(e) if e.local_name().as_ref() == "wpt" => {
+                    let mut point = point_from_attributes(&e)?;
+                    self.point_children(&mut point)?;
+                    file.waypoints.push(point);
+                }
+                Event::Empty(e) if e.local_name().as_ref() == "wpt" => {
+                    file.waypoints.push(point_from_attributes(&e)?);
+                }
+                Event::Start(e) if e.local_name().as_ref() == "rte" => {
+                    file.routes.push(self.route()?);
+                }
+                Event::Empty(e) if e.local_name().as_ref() == "rte" => {
+                    file.routes.push(Route::default());
+                }
+                Event::Start(e) => self.skip_element(e.name())?,
+                Event::End(_) => return Ok(()),
+                Event::Eof => return Err(self.unexpected_eof()),
+                _ => {}
+            }
+        }
+    }
+
+    fn route(&mut self) -> Result<Route> {
+        let mut route = Route::default();
+        loop {
+            match self.next_event()? {
+                Event::Start(e) if e.local_name().as_ref() == "name" => {
+                    route.name = non_empty(self.text()?);
+                }
+                Event::Start(e) if e.local_name().as_ref() == "rtept" => {
+                    route.via_point_count += 1;
+                    push_distinct(&mut route.points, point_from_attributes(&e)?);
+                    self.route_point_children(&mut route)?;
+                }
+                Event::Empty(e) if e.local_name().as_ref() == "rtept" => {
+                    route.via_point_count += 1;
+                    push_distinct(&mut route.points, point_from_attributes(&e)?);
+                }
+                Event::Start(e) => self.skip_element(e.name())?,
+                Event::End(_) => return Ok(route),
+                Event::Eof => return Err(self.unexpected_eof()),
+                _ => {}
+            }
+        }
+    }
+
+    fn route_point_children(&mut self, route: &mut Route) -> Result<()> {
+        loop {
+            match self.next_event()? {
+                Event::Start(e) if e.local_name().as_ref() == "extensions" => {
+                    self.shape_points(route)?;
+                }
+                Event::Start(e) => self.skip_element(e.name())?,
+                Event::End(_) => return Ok(()),
+                Event::Eof => return Err(self.unexpected_eof()),
+                _ => {}
+            }
+        }
+    }
+
+    fn shape_points(&mut self, route: &mut Route) -> Result<()> {
+        loop {
+            let element = match self.next_event()? {
+                Event::Start(e) => self.element(&e, 1)?,
+                Event::Empty(e) => element_from_start(&self.reader, &e)?,
+                Event::End(_) => return Ok(()),
+                Event::Eof => return Err(self.unexpected_eof()),
+                _ => continue,
+            };
+            collect_shape_points(&element, &mut route.points)?;
         }
     }
 
@@ -300,9 +425,46 @@ fn point_from_attributes(start: &BytesStart) -> Result<TracePoint> {
             _ => {}
         }
     }
-    let lat = lat.ok_or_else(|| Error::InvalidGpx("trkpt has no lat".into()))?;
-    let lon = lon.ok_or_else(|| Error::InvalidGpx("trkpt has no lon".into()))?;
+    let tag = start.local_name();
+    let tag = tag.as_ref();
+    let lat = lat.ok_or_else(|| Error::InvalidGpx(format!("{tag} has no lat")))?;
+    let lon = lon.ok_or_else(|| Error::InvalidGpx(format!("{tag} has no lon")))?;
     Ok(TracePoint::new(lat, lon))
+}
+
+/// Adds any shape points in `element` or its descendants to `points`.
+fn collect_shape_points(element: &XmlElement, points: &mut Vec<TracePoint>) -> Result<()> {
+    if element.namespace.as_deref() == Some(GARMIN_NAMESPACE) && element.local_name == "rpt" {
+        let coordinate = |field: &str| {
+            let value = element
+                .attributes
+                .iter()
+                .find(|a| a.namespace.is_none() && a.local_name == field)
+                .map_or("", |a| a.value.as_str());
+            parse_float_field(field, value)?
+                .ok_or_else(|| Error::InvalidGpx(format!("rpt has no {field}")))
+        };
+        push_distinct(
+            points,
+            TracePoint::new(coordinate("lat")?, coordinate("lon")?),
+        );
+    }
+    for child in &element.children {
+        if let XmlNode::Element(child) = child {
+            collect_shape_points(child, points)?;
+        }
+    }
+    Ok(())
+}
+
+/// Adds a point unless the previous one is at the same position.
+fn push_distinct(points: &mut Vec<TracePoint>, point: TracePoint) {
+    let repeated = points
+        .last()
+        .is_some_and(|last| last.lat == point.lat && last.lon == point.lon);
+    if !repeated {
+        points.push(point);
+    }
 }
 
 fn element_from_start<R>(reader: &NsReader<R>, start: &BytesStart) -> Result<XmlElement> {
@@ -428,6 +590,21 @@ pub fn write_route(mut writer: impl Write, points: &[TracePoint]) -> Result<()> 
         .map_err(stream_error)
 }
 
+/// Writes routes to a file as tracks, with waypoints kept alongside them.
+pub fn save_routes_as_tracks(path: impl AsRef<Path>, file: &RouteFile) -> Result<()> {
+    let path = path.as_ref();
+    fs::write(path, render_routes_as_tracks(file)).map_err(|source| io_error(path, source))
+}
+
+/// Writes routes as tracks, one per route, with waypoints kept alongside them.
+///
+/// Apps draw a track exactly as recorded, where they may recalculate a route.
+pub fn write_routes_as_tracks(mut writer: impl Write, file: &RouteFile) -> Result<()> {
+    writer
+        .write_all(render_routes_as_tracks(file).as_bytes())
+        .map_err(stream_error)
+}
+
 fn io_error(path: &Path, source: io::Error) -> Error {
     Error::Io {
         path: Some(PathBuf::from(path)),
@@ -509,25 +686,24 @@ fn render_track(points: &[TracePoint]) -> String {
     open_document(&mut out, &scope);
     out.push_str("  <trk>\n    <trkseg>\n");
     for point in points {
-        render_track_point(&mut out, point, &mut scope);
+        render_point(&mut out, "trkpt", point, 6, &mut scope);
     }
     out.push_str("    </trkseg>\n  </trk>\n</gpx>\n");
     out
 }
 
-fn render_track_point(out: &mut String, point: &TracePoint, scope: &mut Scope) {
-    const INDENT: usize = 6;
+fn render_point(out: &mut String, tag: &str, point: &TracePoint, indent: usize, scope: &mut Scope) {
     let extras = &point.extras;
-    push_point_open(out, "trkpt", point, INDENT);
+    push_point_open(out, tag, point, indent);
     if let Some(elevation) = point.elevation {
-        push_field(out, INDENT + 2, "ele", &format_float(elevation));
+        push_field(out, indent + 2, "ele", &format_float(elevation));
     }
     if let Some(time) = point.time {
         let time = time.to_rfc3339_opts(SecondsFormat::AutoSi, true);
-        push_field(out, INDENT + 2, "time", &time);
+        push_field(out, indent + 2, "time", &time);
     }
     if let Some(value) = extras.magnetic_variation {
-        push_field(out, INDENT + 2, "magvar", &format_float(value));
+        push_field(out, indent + 2, "magvar", &format_float(value));
     }
     let text_fields = [
         ("name", &extras.name),
@@ -537,7 +713,7 @@ fn render_track_point(out: &mut String, point: &TracePoint, scope: &mut Scope) {
     ];
     for (tag, value) in text_fields {
         if let Some(value) = value {
-            push_field(out, INDENT + 2, tag, value);
+            push_field(out, indent + 2, tag, value);
         }
     }
     let dilution_fields = [
@@ -547,21 +723,43 @@ fn render_track_point(out: &mut String, point: &TracePoint, scope: &mut Scope) {
     ];
     for (tag, value) in dilution_fields {
         if let Some(value) = value {
-            push_field(out, INDENT + 2, tag, &format_float(value));
+            push_field(out, indent + 2, tag, &format_float(value));
         }
     }
     if !extras.extensions.is_empty() || point.way_id.is_some() {
-        let _ = writeln!(out, "{:INDENT$}  <extensions>", "");
+        let _ = writeln!(out, "{:indent$}  <extensions>", "");
         for extension in &extras.extensions {
-            push_element(out, extension, scope, Some(INDENT + 4));
+            push_element(out, extension, scope, Some(indent + 4));
         }
         if let Some(way_id) = point.way_id {
             let tag = format!("{WAY_ID_PREFIX}:{WAY_ID_LOCAL_NAME}");
-            push_field(out, INDENT + 4, &tag, &way_id.to_string());
+            push_field(out, indent + 4, &tag, &way_id.to_string());
         }
-        let _ = writeln!(out, "{:INDENT$}  </extensions>", "");
+        let _ = writeln!(out, "{:indent$}  </extensions>", "");
     }
-    let _ = writeln!(out, "{:INDENT$}</trkpt>", "");
+    let _ = writeln!(out, "{:indent$}</{tag}>", "");
+}
+
+fn render_routes_as_tracks(file: &RouteFile) -> String {
+    let mut scope = root_scope(&file.waypoints);
+    let mut out = String::new();
+    open_document(&mut out, &scope);
+    for waypoint in &file.waypoints {
+        render_point(&mut out, "wpt", waypoint, 2, &mut scope);
+    }
+    for route in &file.routes {
+        out.push_str("  <trk>\n");
+        if let Some(name) = &route.name {
+            push_field(&mut out, 4, "name", name);
+        }
+        out.push_str("    <trkseg>\n");
+        for point in &route.points {
+            render_point(&mut out, "trkpt", point, 6, &mut scope);
+        }
+        out.push_str("    </trkseg>\n  </trk>\n");
+    }
+    out.push_str("</gpx>\n");
+    out
 }
 
 fn render_route(points: &[TracePoint]) -> String {
@@ -1059,5 +1257,137 @@ mod tests {
         assert_eq!(load_points(&path).unwrap(), [point.clone()]);
         save_route(&path, &[point]).unwrap();
         assert!(fs::read_to_string(&path).unwrap().contains("<rtept"));
+    }
+
+    const GARMIN_ROUTE: &str = "<?xml version='1.0' encoding='UTF-8'?>
+<gpx version='1.1' creator='test' xmlns='http://www.topografix.com/GPX/1/1'
+     xmlns:gpxx='http://www.garmin.com/xmlschemas/GpxExtensions/v3'
+     xmlns:other='urn:other'>
+  <wpt lat='1.5' lon='2.5'><name>Caf&#233; &amp; Bar</name><sym>Flag</sym>
+    <extensions><other:note>hi</other:note></extensions></wpt>
+  <wpt lat='3.5' lon='4.5'/>
+  <trk><trkseg><trkpt lat='50' lon='50'/></trkseg></trk>
+  <rte>
+    <name>Coast &lt;&amp;&gt; Hills</name>
+    <rtept lat='10' lon='20'>
+      <ele>100</ele><name>Start</name>
+      <extensions><gpxx:RoutePointExtension>
+        <gpxx:Subclass>000000</gpxx:Subclass>
+        <gpxx:rpt lat='10' lon='20'/>
+        <gpxx:rpt lat='10.1' lon='20.1'><gpxx:Subclass>01</gpxx:Subclass></gpxx:rpt>
+        <other:rpt lat='99' lon='99'/>
+        <gpxx:rpt lat='11' lon='21'/>
+      </gpxx:RoutePointExtension></extensions>
+    </rtept>
+    <rtept lat='11' lon='21'/>
+    <rtept lat='10' lon='20'/>
+  </rte>
+  <rte><rtept lat='30' lon='40'/><rtept lat='30' lon='40'/></rte>
+  <rte/>
+</gpx>";
+
+    fn coordinates(points: &[TracePoint]) -> Vec<(f64, f64)> {
+        points.iter().map(|p| (p.lat, p.lon)).collect()
+    }
+
+    #[test]
+    fn routes_flatten_shape_points_in_order_and_merge_repeats() {
+        let file = read_routes(GARMIN_ROUTE.as_bytes()).unwrap();
+        let route = &file.routes[0];
+        assert_eq!(route.name.as_deref(), Some("Coast <&> Hills"));
+        assert_eq!(route.via_point_count, 3);
+        // Only repeats in a row merge, so returning to the start is kept.
+        assert_eq!(
+            coordinates(&route.points),
+            [(10.0, 20.0), (10.1, 20.1), (11.0, 21.0), (10.0, 20.0)]
+        );
+        assert_eq!(route.points[0], TracePoint::new(10.0, 20.0));
+    }
+
+    #[test]
+    fn routes_without_shape_points_or_names_still_count() {
+        let file = read_routes(GARMIN_ROUTE.as_bytes()).unwrap();
+        assert_eq!(file.routes.len(), 3);
+        assert_eq!(file.routes[1].name, None);
+        assert_eq!(file.routes[1].via_point_count, 2);
+        assert_eq!(coordinates(&file.routes[1].points), [(30.0, 40.0)]);
+        assert_eq!(file.routes[2], Route::default());
+    }
+
+    #[test]
+    fn reading_routes_keeps_waypoints_and_ignores_tracks() {
+        let file = read_routes(GARMIN_ROUTE.as_bytes()).unwrap();
+        assert_eq!(coordinates(&file.waypoints), [(1.5, 2.5), (3.5, 4.5)]);
+        assert_eq!(file.waypoints[0].extras.name.as_deref(), Some("Café & Bar"));
+        assert_eq!(file.waypoints[0].extras.symbol.as_deref(), Some("Flag"));
+        assert_eq!(read(GARMIN_ROUTE).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn routes_are_written_as_one_track_each_after_the_waypoints() {
+        let file = read_routes(GARMIN_ROUTE.as_bytes()).unwrap();
+        let mut out = Vec::new();
+        write_routes_as_tracks(&mut out, &file).unwrap();
+        let xml = String::from_utf8(out).unwrap();
+
+        assert_eq!(xml.matches("<trk>").count(), 3);
+        assert!(!xml.contains("<rte"));
+        assert!(!xml.contains("gpxx"));
+        assert!(xml.contains("<name>Coast &lt;&amp;&gt; Hills</name>"));
+        assert!(xml.find("<wpt").unwrap() < xml.find("<trk>").unwrap());
+
+        let points = read(&xml).unwrap();
+        assert_eq!(points.len(), 5);
+        assert_eq!(points[1], TracePoint::new(10.1, 20.1));
+
+        let reread = read_routes(xml.as_bytes()).unwrap();
+        assert_eq!(reread.waypoints, file.waypoints);
+    }
+
+    #[test]
+    fn unnamed_routes_give_unnamed_tracks() {
+        let route = Route {
+            points: vec![TracePoint::new(1.0, 2.0)],
+            ..Route::default()
+        };
+        let file = RouteFile {
+            routes: vec![route],
+            ..RouteFile::default()
+        };
+        let xml = render_routes_as_tracks(&file);
+        assert!(!xml.contains("<name>"));
+    }
+
+    #[test]
+    fn invalid_route_coordinates_are_errors() {
+        let wrap = |body: &str| {
+            format!(
+                "<gpx xmlns:gpxx='http://www.garmin.com/xmlschemas/GpxExtensions/v3'>{body}</gpx>"
+            )
+        };
+        let shape = |rpt: &str| {
+            wrap(&format!(
+                "<rte><rtept lat='1' lon='1'><extensions>{rpt}</extensions></rtept></rte>"
+            ))
+        };
+        let cases = [
+            (wrap("<wpt lon='1'/>"), "wpt has no lat"),
+            (wrap("<rte><rtept lat='1'/></rte>"), "rtept has no lon"),
+            (shape("<gpxx:rpt lon='1'/>"), "rpt has no lat"),
+            (shape("<gpxx:rpt lat='1' lon=''/>"), "rpt has no lon"),
+            (
+                shape("<gpxx:rpt lat='x' lon='1'/>"),
+                "invalid value for lat",
+            ),
+            (
+                shape("<gpxx:rpt lat='NaN' lon='1'/>"),
+                "invalid value for lat",
+            ),
+            (wrap("<rte><rtept lat='1' lon='1'>"), "invalid GPX"),
+        ];
+        for (xml, expected) in cases {
+            let error = read_routes(xml.as_bytes()).unwrap_err().to_string();
+            assert!(error.contains(expected), "{xml}: {error}");
+        }
     }
 }

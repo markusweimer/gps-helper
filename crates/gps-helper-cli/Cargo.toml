@@ -10,6 +10,7 @@ authors.workspace = true
 [[bin]]
 name = "gps-helper"
 path = "src/main.rs"
+doc = false
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
