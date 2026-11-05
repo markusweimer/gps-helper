@@ -12,10 +12,10 @@ route planners. It:
 ## Install
 
 ```bash
-pip install -e .
+cargo install --path crates/gps-helper-cli
 ```
 
-This exposes a `gps-helper` console command.
+This installs a `gps-helper` command.
 
 ## Usage
 
@@ -97,9 +97,16 @@ elements, which route planners treat as via-points and fill in the
 road geometry themselves. This is dramatically smaller than track output
 and is the format most route planners prefer to import.
 
+## Using it as a library
+
+The `gps-helper` crate (`crates/gps-helper`) holds all of the logic, and
+`gps-helper-cli` is a thin wrapper around it. The crate does blocking I/O and
+never prints; long-running calls report progress through callbacks. Implement
+the `Backend` trait to plug in your own map matcher. Run `cargo doc --open` for
+the API.
+
 ## Development
 
 ```bash
-pip install -e '.[dev]'
-pytest
+cargo test --workspace
 ```

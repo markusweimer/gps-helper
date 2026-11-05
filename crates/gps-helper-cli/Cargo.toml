@@ -1,0 +1,19 @@
+[package]
+name = "gps-helper-cli"
+description = "Command-line interface for gps-helper."
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "gps-helper"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
+gps-helper = { path = "../gps-helper" }
+
+[dev-dependencies]
+tempfile = "3.27.0"

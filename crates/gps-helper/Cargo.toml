@@ -1,0 +1,19 @@
+[package]
+name = "gps-helper"
+description = "Snap GPS traces to OSM roads and simplify them by keeping only points near road changes."
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+chrono = { version = "0.4.45", default-features = false, features = ["std"] }
+quick-xml = "0.42.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
+thiserror = "2.0.21"
+ureq = "3.5.1"
+
+[dev-dependencies]
+tempfile = "3.27.0"
