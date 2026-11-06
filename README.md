@@ -19,7 +19,7 @@ This installs a `gps-helper` command.
 
 ## Usage
 
-The easiest way — produce all three outputs at once:
+The easiest way — produce all the outputs at once:
 
 ```bash
 gps-helper process ride.gpx
@@ -27,6 +27,12 @@ gps-helper process ride.gpx
 # -> ride.simplified.gpx   (simplified track, context-based)
 # -> ride.route.gpx        (GPX route, one via-point per road)
 ```
+
+If the input has routes, `process` also converts them as described in
+[Converting routes to tracks](#converting-routes-to-tracks), adding
+`ride.track.gpx`. A file with only routes is then aligned and simplified using
+those route points, all routes joined in order. A file with a recorded track
+uses that track instead.
 
 Optionally set a base name for the outputs:
 
@@ -60,6 +66,8 @@ gps-helper route-to-track trip.gpx
 
 gps-helper route-to-track trip.gpx -o out.gpx
 ```
+
+Use this to get only the track, with no map-matching requests.
 
 Each route becomes one track with the same name, and waypoints are kept. Only
 coordinates carry over to track points. A route without shape points becomes

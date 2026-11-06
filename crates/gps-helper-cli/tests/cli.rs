@@ -133,6 +133,8 @@ fn process_writes_all_three_outputs_next_to_the_input() {
     assert_eq!(count(&route, "<rtept "), 4);
     assert_eq!(count(&route, "<name>Main St</name>"), 2);
     assert_eq!(count(&route, "<name>way 2</name>"), 2);
+
+    assert!(!dir.path().join("ride.track.gpx").exists());
 }
 
 #[test]
@@ -370,4 +372,91 @@ fn route_to_track_refuses_files_without_routes_and_writes_nothing() {
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("no <rte> routes"));
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn process_converts_routes_and_aligns_their_points() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("trip.gpx");
+    fs::write(&input, ROUTE_INPUT).unwrap();
+    let url = mock_server(1, 200, VALHALLA_RESPONSE);
+
+    let output = gps_helper(&[
+        "process",
+        path_str(&input),
+        "--backend-url",
+        &url,
+        "--rate-limit",
+        "0",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(
+        log.contains("Morning: 2 route points -> 3 track points."),
+        "{log}"
+    );
+    assert!(log.contains("Done: 4 points -> 4 aligned"), "{log}");
+    assert!(log.contains("trip.track.gpx"), "{log}");
+
+    // The track is the unmatched geometry; the aligned file is snapped to roads.
+    let track = fs::read_to_string(dir.path().join("trip.track.gpx")).unwrap();
+    assert_eq!(count(&track, "<trkpt "), 4);
+    assert_eq!(count(&track, "<wpt "), 1);
+    assert!(track.contains(r#"lat="10.5" lon="20.5""#), "{track}");
+
+    let aligned = fs::read_to_string(dir.path().join("trip.aligned.gpx")).unwrap();
+    assert_eq!(count(&aligned, "<trkpt "), 4);
+    assert!(aligned.contains(r#"lat="41.0" lon="-106.0""#), "{aligned}");
+    assert_eq!(count(&aligned, "<gh:way_id>"), 4);
+    for name in ["trip.simplified.gpx", "trip.route.gpx"] {
+        assert!(dir.path().join(name).exists(), "{name}");
+    }
+}
+
+#[test]
+fn process_prefers_a_recorded_track_but_still_converts_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("both.gpx");
+    let both = INPUT.replace(
+        "</gpx>",
+        r#"<rte><rtept lat="30" lon="40"/><rtept lat="31" lon="41"/></rte></gpx>"#,
+    );
+    fs::write(&input, both).unwrap();
+    let url = mock_server(1, 200, VALHALLA_RESPONSE);
+
+    let output = gps_helper(&[
+        "process",
+        path_str(&input),
+        "--backend-url",
+        &url,
+        "--rate-limit",
+        "0",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let log = stderr(&output);
+    assert!(log.contains("Done: 6 points -> 6 aligned"), "{log}");
+    assert!(log.contains("routes were only converted"), "{log}");
+
+    let track = fs::read_to_string(dir.path().join("both.track.gpx")).unwrap();
+    assert_eq!(count(&track, "<trkpt "), 2);
+}
+
+#[test]
+fn process_keeps_the_converted_track_when_the_backend_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("trip.gpx");
+    fs::write(&input, ROUTE_INPUT).unwrap();
+    let url = mock_server(1, 400, r#"{"error": "No suitable edges"}"#);
+
+    let output = gps_helper(&[
+        "process",
+        path_str(&input),
+        "--backend-url",
+        &url,
+        "--rate-limit",
+        "0",
+    ]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(dir.path().join("trip.track.gpx").exists());
+    assert!(!dir.path().join("trip.aligned.gpx").exists());
 }

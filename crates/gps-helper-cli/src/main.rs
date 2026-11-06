@@ -37,12 +37,13 @@ enum Command {
         #[arg(short, long, value_enum, default_value_t = Format::Track)]
         format: Format,
     },
-    /// Align then simplify in a single run.
+    /// Align then simplify in a single run, also converting any routes to tracks.
     Process {
         /// Input GPX file.
         input: PathBuf,
         /// Base name for outputs. Defaults to input name. Produces
-        /// <base>.aligned.gpx, <base>.simplified.gpx, <base>.route.gpx.
+        /// <base>.aligned.gpx, <base>.simplified.gpx, <base>.route.gpx, and
+        /// <base>.track.gpx if the input has routes.
         #[arg(short, long)]
         output: Option<PathBuf>,
         #[command(flatten)]
@@ -192,7 +193,25 @@ fn run(cli: Cli) -> Result<(), Failure> {
             let path_simplified = suffixed_path(base, "simplified");
             let path_route = suffixed_path(base, "route");
 
-            let points = load(&input)?;
+            let recorded = load(&input)?;
+            let routes = gpx::load_routes(&input)?;
+            let path_track = (!routes.routes.is_empty()).then(|| suffixed_path(base, "track"));
+            if let Some(path) = &path_track {
+                save_routes_as_tracks(path, &routes)?;
+            }
+            // A recorded track says where the trip really went, so it wins.
+            let points = if recorded.is_empty() {
+                routes
+                    .routes
+                    .iter()
+                    .flat_map(|r| r.points.clone())
+                    .collect()
+            } else {
+                if path_track.is_some() {
+                    eprintln!("Processing the recorded track; routes were only converted.");
+                }
+                recorded
+            };
             let aligned = align(&points, &backend)?;
 
             eprintln!("Writing {} ...", path_aligned.display());
@@ -217,6 +236,9 @@ fn run(cli: Cli) -> Result<(), Failure> {
             eprintln!("  {}", path_aligned.display());
             eprintln!("  {}", path_simplified.display());
             eprintln!("  {}", path_route.display());
+            if let Some(path) = &path_track {
+                eprintln!("  {}", path.display());
+            }
         }
         Command::RouteToTrack { input, output } => {
             let output = output.unwrap_or_else(|| suffixed_path(&input, "track"));
@@ -225,16 +247,7 @@ fn run(cli: Cli) -> Result<(), Failure> {
             if file.routes.is_empty() {
                 return Err(Failure::Usage("input has no <rte> routes.".to_owned()));
             }
-            eprintln!("Writing {} ...", output.display());
-            gpx::save_routes_as_tracks(&output, &file)?;
-            for route in &file.routes {
-                eprintln!(
-                    "{}: {} route points -> {} track points.",
-                    route.name.as_deref().unwrap_or("(unnamed)"),
-                    route.via_point_count,
-                    route.points.len()
-                );
-            }
+            save_routes_as_tracks(&output, &file)?;
         }
     }
     Ok(())
@@ -245,6 +258,20 @@ fn load(path: &Path) -> Result<Vec<TracePoint>, Error> {
     let points = gpx::load_points(path)?;
     eprintln!("  {} points loaded.", points.len());
     Ok(points)
+}
+
+fn save_routes_as_tracks(path: &Path, file: &gpx::RouteFile) -> Result<(), Error> {
+    eprintln!("Writing {} ...", path.display());
+    gpx::save_routes_as_tracks(path, file)?;
+    for route in &file.routes {
+        eprintln!(
+            "{}: {} route points -> {} track points.",
+            route.name.as_deref().unwrap_or("(unnamed)"),
+            route.via_point_count,
+            route.points.len()
+        );
+    }
+    Ok(())
 }
 
 fn align(points: &[TracePoint], args: &BackendArgs) -> Result<Vec<TracePoint>, Error> {
